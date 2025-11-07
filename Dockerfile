@@ -7,10 +7,13 @@ ARG userid=1000
 ARG groupid=1000
 ARG user=hopsfs
 
-# Install required packages (including gcc, hostname, tar, gzip, and git)
+# Install required packages (including gcc, hostname, tar, gzip, git, and fuse3)
 RUN yum -y update && \
-    yum install -y wget git make gcc hostname tar gzip && \
+    yum install -y wget git make gcc hostname tar gzip fuse3 && \
     yum clean all
+
+# Configure FUSE to allow the allow_other option
+RUN echo "user_allow_other" >> /etc/fuse.conf
 
 RUN  cd /tmp; \
 wget https://go.dev/dl/go1.19.1.linux-amd64.tar.gz 
