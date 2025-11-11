@@ -22,6 +22,7 @@ type FileHandle struct {
 	tatalBytesRead    int64
 	totalBytesWritten int64
 	fhID              uint64 // file handle id. for debugging only
+	isNewFile         bool   // tracks if this is a newly created file
 }
 
 // Verify that *FileHandle implements necesary FUSE interfaces
@@ -135,14 +136,20 @@ func (fh *FileHandle) copyToDFS(operation string) error {
 
 func (fh *FileHandle) FlushAttempt(operation string) error {
 	hdfsAccessor := fh.File.FileSystem.getDFSConnector()
-	//delete the file and then rewrite.
-	//note we can not rely on the overwrite functionality of CreateFile API.
-	//For example if the file has permission set to 444 then we can not overwrite it
-	err := hdfsAccessor.Remove(fh.File.AbsolutePath())
-	if err != nil {
-		// may be this is a retry and the file has already been deleted
-		// log error and continue
-		logger.Warn("Unable to delete the file during flush.", fh.logInfo(logger.Fields{Operation: operation, Error: err}))
+
+	// Skip delete for newly created files on first flush (performance optimization)
+	// For existing files, delete and then rewrite.
+	// Note: we can not rely on the overwrite functionality of CreateFile API.
+	// For example if the file has permission set to 444 then we can not overwrite it
+	if !fh.isNewFile {
+		err := hdfsAccessor.Remove(fh.File.AbsolutePath())
+		if err != nil {
+			// may be this is a retry and the file has already been deleted
+			// log error and continue
+			logger.Warn("Unable to delete the file during flush.", fh.logInfo(logger.Fields{Operation: operation, Error: err}))
+		}
+	} else {
+		logger.Debug("Skipping delete for new file on first flush", fh.logInfo(logger.Fields{Operation: operation}))
 	}
 
 	w, err := hdfsAccessor.CreateFile(fh.File.AbsolutePath(), fh.File.Attrs.Mode, true)
@@ -200,6 +207,10 @@ func (fh *FileHandle) FlushAttempt(operation string) error {
 	logger.Info("Uploaded to DFS", fh.logInfo(logger.Fields{Operation: operation, Bytes: written}))
 
 	fh.File.Attrs.Size = written
+
+	// Mark file as no longer new after first successful flush
+	fh.isNewFile = false
+
 	return nil
 }
 

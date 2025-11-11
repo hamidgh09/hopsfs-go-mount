@@ -288,7 +288,7 @@ func (file *FileINode) NewFileHandle(existsInDFS bool, flags fuse.OpenFlags) (*F
 	file.lockFileHandles()
 	defer file.unlockFileHandles()
 
-	fh := &FileHandle{File: file, fileFlags: flags, fhID: rand.Uint64()}
+	fh := &FileHandle{File: file, fileFlags: flags, fhID: rand.Uint64(), isNewFile: !existsInDFS}
 	operation := Create
 	if existsInDFS {
 		operation = Open
