@@ -71,4 +71,9 @@ const (
 	GetGroupFromHopsFSDatasetPath = "get_group_from_dataset_path"
 	HopsFSUserName                = "hopsfs_user_name"
 	ID                            = "id"
+	TotalTime                     = "total_time"
+	CreateTime                    = "create_time"
+	SeekTime                      = "seek_time"
+	UploadTime                    = "upload_time"
+	CloseTime                     = "close_time"
 )

@@ -7,6 +7,7 @@ import (
 	"io"
 	"sync"
 	"syscall"
+	"time"
 
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
@@ -137,6 +138,9 @@ func (fh *FileHandle) copyToDFS(operation string) error {
 func (fh *FileHandle) FlushAttempt(operation string) error {
 	hdfsAccessor := fh.File.FileSystem.getDFSConnector()
 
+	// Track timing for each step
+	var createTime, seekTime, uploadTime, closeTime time.Duration
+
 	// Skip delete for newly created files on first flush (performance optimization)
 	// For existing files, delete and then rewrite.
 	// Note: we can not rely on the overwrite functionality of CreateFile API.
@@ -152,19 +156,24 @@ func (fh *FileHandle) FlushAttempt(operation string) error {
 		logger.Debug("Skipping delete for new file on first flush", fh.logInfo(logger.Fields{Operation: operation}))
 	}
 
+	createStart := time.Now()
 	w, err := hdfsAccessor.CreateFile(fh.File.AbsolutePath(), fh.File.Attrs.Mode, true)
+	createTime = time.Since(createStart)
 	if err != nil {
 		logger.Error("Error creating file in DFS", fh.logInfo(logger.Fields{Operation: operation, Error: err}))
 		return err
 	}
 
 	//open the file for reading and upload to DFS
+	seekStart := time.Now()
 	err = fh.File.fileProxy.SeekToStart()
+	seekTime = time.Since(seekStart)
 	if err != nil {
 		logger.Error("Unable to seek to the begenning of the temp file", fh.logInfo(logger.Fields{Operation: operation, Error: err}))
 		return err
 	}
 
+	uploadStart := time.Now()
 	written := uint64(0)
 	for {
 		b := make([]byte, 65536)
@@ -198,13 +207,27 @@ func (fh *FileHandle) FlushAttempt(operation string) error {
 			break
 		}
 	}
+	uploadTime = time.Since(uploadStart)
 
+	closeStart := time.Now()
+	time.Sleep(10 * time.Millisecond)
 	err = w.Close()
+	closeTime = time.Since(closeStart)
 	if err != nil {
 		logger.Error("Failed to close file in DFS", fh.logInfo(logger.Fields{Operation: operation, Error: err}))
 		return err
 	}
-	logger.Info("Uploaded to DFS", fh.logInfo(logger.Fields{Operation: operation, Bytes: written}))
+
+	totalTime := createTime + seekTime + uploadTime + closeTime
+	logger.Info("Uploaded to DFS", fh.logInfo(logger.Fields{
+		Operation:  operation,
+		Bytes:      written,
+		TotalTime:  totalTime.Milliseconds(),
+		CreateTime: createTime.Milliseconds(),
+		SeekTime:   seekTime.Milliseconds(),
+		UploadTime: uploadTime.Milliseconds(),
+		CloseTime:  closeTime.Milliseconds(),
+	}))
 
 	fh.File.Attrs.Size = written
 
