@@ -74,7 +74,7 @@ func (c *LocalCache) Get(hdfsPath string, upstreamSize int64, upstreamMtime time
 	// Move to front of LRU list (most recently used)
 	c.lruList.MoveToFront(entry.lruElement)
 
-	logger.Debug("Cache hit for staging file", logger.Fields{
+	logger.Info("Cache hit for staging file", logger.Fields{
 		Path:    hdfsPath,
 		TmpFile: entry.localPath,
 	})
