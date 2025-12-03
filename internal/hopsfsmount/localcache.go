@@ -5,6 +5,7 @@ package hopsfsmount
 
 import (
 	"container/list"
+	"fmt"
 	"os"
 	"sync"
 	"time"
@@ -56,19 +57,19 @@ func (c *LocalCache) Get(hdfsPath string, upstreamSize int64, upstreamMtime time
 
 	entry, ok := c.entries[hdfsPath]
 	if !ok {
+		logger.Info("Cache miss for staging file", logger.Fields{
+			Path: hdfsPath,
+		})
 		return "", false
 	}
 
 	// Validate cache entry against upstream metadata
 	// If size or mtime differs, the file was modified by another client
 	if entry.size != upstreamSize || !entry.mtime.Equal(upstreamMtime) {
-		logger.Info("Cached staging file is stale (upstream modified), invalidating", logger.Fields{
-			Path:             hdfsPath,
-			TmpFile:          entry.localPath,
-			"cached_size":    entry.size,
-			"cached_mtime":   entry.mtime,
-			"upstream_size":  upstreamSize,
-			"upstream_mtime": upstreamMtime,
+		logger.Info(fmt.Sprintf("Cached staging file is stale, invalidating. cached[size=%d, mtime=%v] upstream[size=%d, mtime=%v]",
+			entry.size, entry.mtime, upstreamSize, upstreamMtime), logger.Fields{
+			Path:    hdfsPath,
+			TmpFile: entry.localPath,
 		})
 		c.removeEntry(hdfsPath)
 		return "", false
@@ -101,7 +102,7 @@ func (c *LocalCache) Put(hdfsPath string, localPath string, size int64, mtime ti
 		existing.size = size
 		existing.mtime = mtime
 		c.lruList.MoveToFront(existing.lruElement)
-		logger.Debug("Updated existing cache entry", logger.Fields{
+		logger.Info("Updated existing cache entry", logger.Fields{
 			Path:     hdfsPath,
 			TmpFile:  localPath,
 			FileSize: size,
@@ -163,7 +164,7 @@ func (c *LocalCache) removeEntry(hdfsPath string) {
 	// Remove from map
 	delete(c.entries, hdfsPath)
 
-	logger.Debug("Removed staging file from cache", logger.Fields{
+	logger.Info("Removed staging file from cache", logger.Fields{
 		Path:    hdfsPath,
 		TmpFile: entry.localPath,
 	})
