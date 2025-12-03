@@ -493,14 +493,40 @@ func (file *FileINode) NewFileHandle(existsInDFS bool, flags fuse.OpenFlags) (*F
 			fh.File.fileProxy = file.fileProxy
 			logger.Info("Opened file, Returning existing handle", fh.logInfo(logger.Fields{Operation: operation, Flags: fh.fileFlags}))
 		} else {
-			// we alway open the file in RO mode. when the client writes to the file
-			// then we upgrade the handle. However, if the file is already opened in
-			// in RW state then we use the existing RW handle
-			reader, err := file.FileSystem.getDFSConnector().OpenRead(file.AbsolutePath())
-			if err != nil {
-				logger.Warn("Opening file failed", fh.logInfo(logger.Fields{Operation: operation, Flags: fh.fileFlags, Error: err}))
-				return nil, err
-			} else {
+			// Check if we have a valid cached staging file for this path
+			// This avoids reading from HopsFS if we have a local copy
+			absPath := file.AbsolutePath()
+			usedCache := false
+
+			if StagingFileCache != nil {
+				// Stat the file to get current upstream metadata for cache validation
+				hdfsAccessor := file.FileSystem.getDFSConnector()
+				upstreamInfo, err := hdfsAccessor.Stat(absPath)
+				if err == nil {
+					if cachedPath, ok := StagingFileCache.Get(absPath, int64(upstreamInfo.Size), upstreamInfo.Mtime); ok {
+						// Try to open the cached file
+						localFile, err := os.OpenFile(cachedPath, os.O_RDWR, 0600)
+						if err == nil {
+							fh.File.fileProxy = &LocalRWFileProxy{localFile: localFile, file: file}
+							logger.Info("Opened file using cached staging file", fh.logInfo(logger.Fields{Operation: operation, Flags: fh.fileFlags, TmpFile: cachedPath}))
+							usedCache = true
+						} else {
+							// Local file was deleted externally, remove from cache
+							logger.Warn("Cached staging file not accessible, removing from cache", fh.logInfo(logger.Fields{Operation: operation, TmpFile: cachedPath, Error: err}))
+							StagingFileCache.Remove(absPath)
+						}
+					}
+				}
+			}
+
+			if !usedCache {
+				// No valid cache, open from HopsFS in RO mode
+				// When the client writes to the file, we upgrade the handle
+				reader, err := file.FileSystem.getDFSConnector().OpenRead(absPath)
+				if err != nil {
+					logger.Warn("Opening file failed", fh.logInfo(logger.Fields{Operation: operation, Flags: fh.fileFlags, Error: err}))
+					return nil, err
+				}
 				fh.File.fileProxy = &RemoteROFileProxy{hdfsReader: reader, file: file}
 				logger.Info("Opened file, RO handle", fh.logInfo(logger.Fields{Operation: operation, Flags: fh.fileFlags}))
 			}
