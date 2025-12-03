@@ -24,9 +24,9 @@ import (
 
 // Lock weight ordering (must be followed to avoid deadlocks):
 //
-//   dataMutex       (weight 3) - serializes I/O operations (read/write/truncate/flush)
-//   fileMutex       (weight 2) - protects file metadata (Attrs) and serializes Open requests
-//   fileHandleMutex (weight 1) - protects activeHandles and fileProxy lifecycle
+//	dataMutex       (weight 3) - serializes I/O operations (read/write/truncate/flush)
+//	fileMutex       (weight 2) - protects file metadata (Attrs) and serializes Open requests
+//	fileHandleMutex (weight 1) - protects activeHandles and fileProxy lifecycle
 //
 // Rule: A goroutine holding a lock can only acquire locks with LOWER weight.
 // Note: dataMutex and fileMutex are independent (never nested with each other).
@@ -150,6 +150,15 @@ func (file *FileINode) RemoveHandle(handle *FileHandle) {
 // Called with fileHandleMutex held by RemoveHandle()
 func (file *FileINode) closeStaging() {
 	if file.fileProxy != nil { // if not already closed
+		// If caching is enabled and this is a LocalRWFileProxy, add to cache before closing
+		if lrwfp, ok := file.fileProxy.(*LocalRWFileProxy); ok && StagingFileCache != nil {
+			stat, statErr := lrwfp.localFile.Stat()
+			localPath := lrwfp.localFile.Name()
+			if statErr == nil && localPath != "" {
+				StagingFileCache.Put(file.AbsolutePath(), localPath, stat.Size())
+			}
+		}
+
 		err := file.fileProxy.Close()
 		if err != nil {
 			logger.Error("Failed to close staging file", file.logInfo(logger.Fields{Operation: Close, Error: err}))
@@ -394,12 +403,30 @@ func (file *FileINode) createStagingFile(operation string, existsInDFS bool) (*o
 		}
 	}
 
+	// Check if we have a cached staging file for this path
+	if StagingFileCache != nil {
+		if cachedPath, ok := StagingFileCache.Get(absPath); ok {
+			localFile, err := os.OpenFile(cachedPath, os.O_RDWR, 0600)
+			if err == nil {
+				logger.Info("Using cached staging file", file.logInfo(logger.Fields{Operation: operation, TmpFile: cachedPath}))
+				return localFile, nil
+			}
+			// Cache entry is invalid (file was deleted externally), remove it
+			logger.Warn("Cached staging file not accessible, removing from cache", file.logInfo(logger.Fields{Operation: operation, TmpFile: cachedPath, Error: err}))
+			StagingFileCache.Remove(absPath)
+		}
+	}
+
 	stagingFile, err := ioutil.TempFile(StagingDir, "stage")
 	if err != nil {
 		logger.Error("Failed to create staging file", file.logInfo(logger.Fields{Operation: operation, Error: err}))
 		return nil, err
 	}
-	os.Remove(stagingFile.Name())
+	// Only unlink the staging file immediately if caching is disabled.
+	// When caching is enabled, we keep the file on disk for potential reuse.
+	if StagingFileCache == nil {
+		os.Remove(stagingFile.Name())
+	}
 	logger.Info("Created staging file", file.logInfo(logger.Fields{Operation: operation, TmpFile: stagingFile.Name()}))
 
 	if existsInDFS {

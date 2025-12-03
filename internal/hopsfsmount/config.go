@@ -43,6 +43,7 @@ var FallBackUser = "root"
 var FallBackGroup = "root"
 var UserUmask string = ""
 var Umask os.FileMode
+var LocalCacheMaxEntries int = 50
 
 func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 	flag.BoolVar(&LazyMount, "lazy", false, "Allows to mount HopsFS filesystem before HopsFS is available")
@@ -72,6 +73,7 @@ func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 	flag.StringVar(&FallBackUser, "fallBackUser", "root", "Local user name if the DFS user is not found on the local file system")
 	flag.StringVar(&FallBackGroup, "fallBackGroup", "root", "Local group name if the DFS group is not found on the local file system.")
 	flag.StringVar(&UserUmask, "umask", "", "Umask for the file system. Must be a 4 digit octal number.")
+	flag.IntVar(&LocalCacheMaxEntries, "localCacheSize", 50, "Max staging files to cache locally (0 to disable)")
 
 	flag.Usage = usage
 	flag.Parse()
@@ -111,6 +113,14 @@ func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 		log.Fatalf("Error validating default user and/or group: %v", err)
 	}
 	logger.Info(fmt.Sprintf("Using umask: %o", Umask), nil)
+
+	// Initialize staging file cache if enabled
+	if LocalCacheMaxEntries > 0 {
+		StagingFileCache = NewLocalCache(LocalCacheMaxEntries)
+		logger.Info(fmt.Sprintf("Staging file cache enabled with max %d entries", LocalCacheMaxEntries), nil)
+	} else {
+		logger.Info("Staging file cache disabled", nil)
+	}
 
 	logger.Info(fmt.Sprintf("Staging dir is:%s, Using TLS: %v, RetryAttempts: %d,  LogFile: %s", StagingDir, Tls, retryPolicy.MaxAttempts, LogFile), nil)
 	logger.Info(fmt.Sprintf("hopsfs-mount: current head GITCommit: %s Built time: %s Built by: %s ", GITCOMMIT, BUILDTIME, HOSTNAME), nil)
