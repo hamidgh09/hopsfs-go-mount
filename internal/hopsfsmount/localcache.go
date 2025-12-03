@@ -63,9 +63,12 @@ func (c *LocalCache) Get(hdfsPath string, upstreamSize int64, upstreamMtime time
 	// If size or mtime differs, the file was modified by another client
 	if entry.size != upstreamSize || !entry.mtime.Equal(upstreamMtime) {
 		logger.Info("Cached staging file is stale (upstream modified), invalidating", logger.Fields{
-			Path:     hdfsPath,
-			TmpFile:  entry.localPath,
-			FileSize: upstreamSize,
+			Path:             hdfsPath,
+			TmpFile:          entry.localPath,
+			"cached_size":    entry.size,
+			"cached_mtime":   entry.mtime,
+			"upstream_size":  upstreamSize,
+			"upstream_mtime": upstreamMtime,
 		})
 		c.removeEntry(hdfsPath)
 		return "", false

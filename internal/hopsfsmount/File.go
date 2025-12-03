@@ -461,6 +461,34 @@ func (file *FileINode) downloadToStaging(stagingFile *os.File, operation string)
 	return nil
 }
 
+// createStagingFileForRead creates a staging file and downloads content from DFS for read caching.
+// This is used when opening an existing file for reading and caching is enabled.
+// Unlike createStagingFile, this doesn't create or stat the file in DFS (caller already did that).
+func (file *FileINode) createStagingFileForRead(operation string) (*os.File, error) {
+	stagingFile, err := ioutil.TempFile(StagingDir, "stage")
+	if err != nil {
+		logger.Error("Failed to create staging file for read", file.logInfo(logger.Fields{Operation: operation, Error: err}))
+		return nil, err
+	}
+
+	logger.Info("Created staging file for read caching", file.logInfo(logger.Fields{Operation: operation, TmpFile: stagingFile.Name()}))
+
+	if err := file.downloadToStaging(stagingFile, operation); err != nil {
+		stagingFile.Close()
+		os.Remove(stagingFile.Name())
+		return nil, err
+	}
+
+	// Seek back to start for reading
+	if _, err := stagingFile.Seek(0, 0); err != nil {
+		stagingFile.Close()
+		os.Remove(stagingFile.Name())
+		return nil, err
+	}
+
+	return stagingFile, nil
+}
+
 // Creates new file handle
 // Lock order: fileHandleMutex (1) alone
 // Called from Open which holds fileMutex (2), so order is: fileMutex (2) → fileHandleMutex (1)
@@ -520,15 +548,35 @@ func (file *FileINode) NewFileHandle(existsInDFS bool, flags fuse.OpenFlags) (*F
 			}
 
 			if !usedCache {
-				// No valid cache, open from HopsFS in RO mode
-				// When the client writes to the file, we upgrade the handle
-				reader, err := file.FileSystem.getDFSConnector().OpenRead(absPath)
-				if err != nil {
-					logger.Warn("Opening file failed", fh.logInfo(logger.Fields{Operation: operation, Flags: fh.fileFlags, Error: err}))
-					return nil, err
+				// No valid cache - decide whether to download to local cache or stream from HopsFS
+				if StagingFileCache != nil {
+					// Caching enabled: download to staging file for future reuse
+					if err := file.checkDiskSpace(); err != nil {
+						// Not enough disk space, fall back to remote streaming
+						logger.Warn("Not enough disk space for caching, using remote read", fh.logInfo(logger.Fields{Operation: operation, Error: err}))
+					} else {
+						stagingFile, err := file.createStagingFileForRead(operation)
+						if err == nil {
+							fh.File.fileProxy = &LocalRWFileProxy{localFile: stagingFile, file: file}
+							logger.Info("Opened file, downloaded to cache", fh.logInfo(logger.Fields{Operation: operation, Flags: fh.fileFlags, TmpFile: stagingFile.Name()}))
+							usedCache = true
+						} else {
+							logger.Warn("Failed to create staging file for read cache, using remote read", fh.logInfo(logger.Fields{Operation: operation, Error: err}))
+						}
+					}
 				}
-				fh.File.fileProxy = &RemoteROFileProxy{hdfsReader: reader, file: file}
-				logger.Info("Opened file, RO handle", fh.logInfo(logger.Fields{Operation: operation, Flags: fh.fileFlags}))
+
+				if !usedCache {
+					// Caching disabled or failed, open from HopsFS in RO mode
+					// When the client writes to the file, we upgrade the handle
+					reader, err := file.FileSystem.getDFSConnector().OpenRead(absPath)
+					if err != nil {
+						logger.Warn("Opening file failed", fh.logInfo(logger.Fields{Operation: operation, Flags: fh.fileFlags, Error: err}))
+						return nil, err
+					}
+					fh.File.fileProxy = &RemoteROFileProxy{hdfsReader: reader, file: file}
+					logger.Info("Opened file, RO handle", fh.logInfo(logger.Fields{Operation: operation, Flags: fh.fileFlags}))
+				}
 			}
 		}
 	}
