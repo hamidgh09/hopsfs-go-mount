@@ -155,7 +155,9 @@ func (file *FileINode) closeStaging() {
 			stat, statErr := lrwfp.localFile.Stat()
 			localPath := lrwfp.localFile.Name()
 			if statErr == nil && localPath != "" {
-				StagingFileCache.Put(file.AbsolutePath(), localPath, stat.Size())
+				// Store with current mtime from Attrs (set after successful flush to DFS)
+				// This allows us to detect if the file was modified by another client
+				StagingFileCache.Put(file.AbsolutePath(), localPath, stat.Size(), file.Attrs.Mtime)
 			}
 		}
 
@@ -395,25 +397,26 @@ func (file *FileINode) createStagingFile(operation string, existsInDFS bool) (*o
 		logger.Info("Created an empty file in DFS", file.logInfo(logger.Fields{Operation: operation}))
 		w.Close()
 	} else {
-		// Request to write to existing file
-		_, err := hdfsAccessor.Stat(absPath)
+		// Request to write to existing file - stat to verify it exists and get metadata
+		upstreamInfo, err := hdfsAccessor.Stat(absPath)
 		if err != nil {
 			logger.Error("Failed to stat file in DFS", file.logInfo(logger.Fields{Operation: operation, Error: err}))
 			return nil, syscall.ENOENT
 		}
-	}
 
-	// Check if we have a cached staging file for this path
-	if StagingFileCache != nil {
-		if cachedPath, ok := StagingFileCache.Get(absPath); ok {
-			localFile, err := os.OpenFile(cachedPath, os.O_RDWR, 0600)
-			if err == nil {
-				logger.Info("Using cached staging file", file.logInfo(logger.Fields{Operation: operation, TmpFile: cachedPath}))
-				return localFile, nil
+		// Check if we have a valid cached staging file for this path
+		if StagingFileCache != nil {
+			if cachedPath, ok := StagingFileCache.Get(absPath, int64(upstreamInfo.Size), upstreamInfo.Mtime); ok {
+				// Cache is valid (metadata matches upstream), try to reuse it
+				localFile, err := os.OpenFile(cachedPath, os.O_RDWR, 0600)
+				if err == nil {
+					logger.Info("Using cached staging file", file.logInfo(logger.Fields{Operation: operation, TmpFile: cachedPath}))
+					return localFile, nil
+				}
+				// Local file was deleted externally, remove from cache
+				logger.Warn("Cached staging file not accessible, removing from cache", file.logInfo(logger.Fields{Operation: operation, TmpFile: cachedPath, Error: err}))
+				StagingFileCache.Remove(absPath)
 			}
-			// Cache entry is invalid (file was deleted externally), remove it
-			logger.Warn("Cached staging file not accessible, removing from cache", file.logInfo(logger.Fields{Operation: operation, TmpFile: cachedPath, Error: err}))
-			StagingFileCache.Remove(absPath)
 		}
 	}
 

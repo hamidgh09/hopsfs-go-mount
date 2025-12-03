@@ -7,6 +7,7 @@ import (
 	"container/list"
 	"os"
 	"sync"
+	"time"
 
 	"hopsworks.ai/hopsfsmount/internal/hopsfsmount/logger"
 )
@@ -26,6 +27,7 @@ type CacheEntry struct {
 	hdfsPath   string
 	localPath  string
 	size       int64
+	mtime      time.Time // modification time when cached, used to detect upstream changes
 	lruElement *list.Element
 }
 
@@ -43,14 +45,29 @@ func NewLocalCache(maxEntries int) *LocalCache {
 }
 
 // Get retrieves a cached file path for the given HDFS path.
-// Returns the local file path and true if found, or ("", false) if not cached.
-// Moves the entry to the front of the LRU list on access.
-func (c *LocalCache) Get(hdfsPath string) (string, bool) {
+// The upstreamSize and upstreamMtime parameters are the current metadata from HopsFS,
+// used to validate that the cached file hasn't been modified by another client.
+// Returns the local file path and true if found and valid, or ("", false) if not cached or stale.
+// If the cache entry is stale (metadata mismatch), it is automatically removed.
+// Moves the entry to the front of the LRU list on successful access.
+func (c *LocalCache) Get(hdfsPath string, upstreamSize int64, upstreamMtime time.Time) (string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	entry, ok := c.entries[hdfsPath]
 	if !ok {
+		return "", false
+	}
+
+	// Validate cache entry against upstream metadata
+	// If size or mtime differs, the file was modified by another client
+	if entry.size != upstreamSize || !entry.mtime.Equal(upstreamMtime) {
+		logger.Info("Cached staging file is stale (upstream modified), invalidating", logger.Fields{
+			Path:     hdfsPath,
+			TmpFile:  entry.localPath,
+			FileSize: upstreamSize,
+		})
+		c.removeEntry(hdfsPath)
 		return "", false
 	}
 
@@ -68,7 +85,9 @@ func (c *LocalCache) Get(hdfsPath string) (string, bool) {
 // Put adds a staging file to the cache. If the cache is full, the least
 // recently used entry is evicted first. If an entry already exists for
 // this path, it is updated and moved to the front of the LRU list.
-func (c *LocalCache) Put(hdfsPath string, localPath string, size int64) {
+// The mtime parameter should be the modification time from HopsFS, used
+// to detect if the file was modified by another client.
+func (c *LocalCache) Put(hdfsPath string, localPath string, size int64, mtime time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -77,6 +96,7 @@ func (c *LocalCache) Put(hdfsPath string, localPath string, size int64) {
 		// Update existing entry
 		existing.localPath = localPath
 		existing.size = size
+		existing.mtime = mtime
 		c.lruList.MoveToFront(existing.lruElement)
 		logger.Debug("Updated existing cache entry", logger.Fields{
 			Path:     hdfsPath,
@@ -96,6 +116,7 @@ func (c *LocalCache) Put(hdfsPath string, localPath string, size int64) {
 		hdfsPath:  hdfsPath,
 		localPath: localPath,
 		size:      size,
+		mtime:     mtime,
 	}
 	entry.lruElement = c.lruList.PushFront(entry)
 	c.entries[hdfsPath] = entry
