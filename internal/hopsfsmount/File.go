@@ -287,6 +287,17 @@ func (file *FileINode) flushAttempt(operation string) error {
 		file.logInfo(logger.Fields{Operation: operation, Bytes: written}))
 
 	file.Attrs.Size = written
+
+	// Stat the file to get the server-assigned mtime after upload
+	// This is needed for cache validation on subsequent reads
+	upstreamInfo, err := hdfsAccessor.Stat(file.AbsolutePath())
+	if err != nil {
+		logger.Warn("Failed to stat file after upload, mtime may be stale", file.logInfo(logger.Fields{Operation: operation, Error: err}))
+	} else {
+		file.Attrs.Mtime = upstreamInfo.Mtime
+		file.Attrs.Size = upstreamInfo.Size
+	}
+
 	return nil
 }
 
