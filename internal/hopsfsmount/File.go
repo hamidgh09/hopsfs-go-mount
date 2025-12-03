@@ -527,6 +527,8 @@ func (file *FileINode) NewFileHandle(existsInDFS bool, flags fuse.OpenFlags) (*F
 			usedCache := false
 			statSucceeded := false
 
+			logger.Info(fmt.Sprintf("Checking cache for file, StagingFileCache=%v", StagingFileCache != nil), fh.logInfo(logger.Fields{Operation: operation}))
+
 			if StagingFileCache != nil {
 				// Stat the file to get current upstream metadata for cache validation
 				hdfsAccessor := file.FileSystem.getDFSConnector()
