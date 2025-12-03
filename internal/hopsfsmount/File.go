@@ -525,12 +525,20 @@ func (file *FileINode) NewFileHandle(existsInDFS bool, flags fuse.OpenFlags) (*F
 			// This avoids reading from HopsFS if we have a local copy
 			absPath := file.AbsolutePath()
 			usedCache := false
+			statSucceeded := false
 
 			if StagingFileCache != nil {
 				// Stat the file to get current upstream metadata for cache validation
 				hdfsAccessor := file.FileSystem.getDFSConnector()
 				upstreamInfo, err := hdfsAccessor.Stat(absPath)
-				if err == nil {
+				if err != nil {
+					logger.Warn("Failed to stat file for cache validation, skipping cache", fh.logInfo(logger.Fields{Operation: operation, Error: err}))
+				} else {
+					statSucceeded = true
+					// Update file.Attrs with upstream metadata so closeStaging can use correct mtime for caching
+					file.Attrs.Size = upstreamInfo.Size
+					file.Attrs.Mtime = upstreamInfo.Mtime
+
 					if cachedPath, ok := StagingFileCache.Get(absPath, int64(upstreamInfo.Size), upstreamInfo.Mtime); ok {
 						// Try to open the cached file
 						localFile, err := os.OpenFile(cachedPath, os.O_RDWR, 0600)
@@ -549,7 +557,8 @@ func (file *FileINode) NewFileHandle(existsInDFS bool, flags fuse.OpenFlags) (*F
 
 			if !usedCache {
 				// No valid cache - decide whether to download to local cache or stream from HopsFS
-				if StagingFileCache != nil {
+				// Only attempt caching if stat succeeded (we have valid metadata for cache validation later)
+				if StagingFileCache != nil && statSucceeded {
 					// Caching enabled: download to staging file for future reuse
 					if err := file.checkDiskSpace(); err != nil {
 						// Not enough disk space, fall back to remote streaming
