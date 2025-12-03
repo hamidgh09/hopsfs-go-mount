@@ -84,7 +84,8 @@ func (file *FileINode) Attr(ctx context.Context, a *fuse.Attr) error {
 		}
 		// update the local cache (fileMutex already held)
 		file.Attrs.Size = uint64(fileInfo.Size())
-		file.Attrs.Mtime = fileInfo.ModTime()
+		// Truncate to second precision to match HopsFS precision for cache consistency
+		file.Attrs.Mtime = fileInfo.ModTime().Truncate(time.Second)
 		return file.Attrs.ConvertAttrToFuse(a)
 	}
 	file.unlockFileHandles()
@@ -293,6 +294,8 @@ func (file *FileINode) flushAttempt(operation string) error {
 	upstreamInfo, err := hdfsAccessor.Stat(file.AbsolutePath())
 	if err != nil {
 		logger.Warn("Failed to stat file after upload, mtime may be stale", file.logInfo(logger.Fields{Operation: operation, Error: err}))
+		// Truncate to second precision to match HopsFS precision
+		file.Attrs.Mtime = file.Attrs.Mtime.Truncate(time.Second)
 	} else {
 		file.Attrs.Mtime = upstreamInfo.Mtime
 		file.Attrs.Size = upstreamInfo.Size
