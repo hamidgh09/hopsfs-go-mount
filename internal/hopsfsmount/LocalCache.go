@@ -32,7 +32,7 @@ type CacheEntry struct {
 	lruElement *list.Element
 }
 
-// Global cache instance, initialized in config.go if caching is enabled
+// StagingFileCache Local cache instance, initialized in config.go if caching is enabled
 var StagingFileCache *LocalCache
 
 // NewLocalCache creates a new cache with the given maximum number of entries.
@@ -134,12 +134,49 @@ func (c *LocalCache) Put(hdfsPath string, localPath string, size int64, mtime ti
 }
 
 // Remove explicitly removes an entry from the cache.
-// This should be called when a file is deleted or renamed in DFS.
+// This should be called when a file is deleted in DFS.
 func (c *LocalCache) Remove(hdfsPath string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.removeEntry(hdfsPath)
+}
+
+// Rename transfers a cache entry from oldPath to newPath.
+// If the entry doesn't exist for oldPath, this is a no-op.
+// If an entry already exists for newPath, it is replaced.
+func (c *LocalCache) Rename(oldPath, newPath string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	entry, ok := c.entries[oldPath]
+	if !ok {
+		// No cache entry for old path, nothing to transfer
+		logger.Info("Cache rename: no entry for old path", logger.Fields{
+			From: oldPath,
+			To:   newPath,
+		})
+		return
+	}
+
+	// Remove any existing entry at the new path
+	if _, exists := c.entries[newPath]; exists {
+		c.removeEntry(newPath)
+	}
+
+	// Update the entry's hdfsPath and move to new key
+	delete(c.entries, oldPath)
+	entry.hdfsPath = newPath
+	c.entries[newPath] = entry
+
+	// Move to front of LRU (most recently used)
+	c.lruList.MoveToFront(entry.lruElement)
+
+	logger.Info("Cache entry renamed", logger.Fields{
+		From:    oldPath,
+		To:      newPath,
+		TmpFile: entry.localPath,
+	})
 }
 
 // removeEntry removes an entry without locking (internal use only)

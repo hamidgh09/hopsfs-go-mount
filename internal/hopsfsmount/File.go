@@ -84,8 +84,7 @@ func (file *FileINode) Attr(ctx context.Context, a *fuse.Attr) error {
 		}
 		// update the local cache (fileMutex already held)
 		file.Attrs.Size = uint64(fileInfo.Size())
-		// Truncate to second precision to match HopsFS precision for cache consistency
-		file.Attrs.Mtime = fileInfo.ModTime().Truncate(time.Second)
+		file.Attrs.Mtime = fileInfo.ModTime()
 		return file.Attrs.ConvertAttrToFuse(a)
 	}
 	file.unlockFileHandles()

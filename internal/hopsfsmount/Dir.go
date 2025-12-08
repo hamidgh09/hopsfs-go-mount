@@ -383,9 +383,9 @@ func (srcParent *DirINode) renameInt(operationName, oldName, newName string, dst
 		return err
 	}
 
-	// Invalidate staging file cache for old path (the cached content is now stale)
+	// Transfer staging file cache entry from old path to new path if it exists
 	if StagingFileCache != nil {
-		StagingFileCache.Remove(oldPath)
+		StagingFileCache.Rename(oldPath, newPath)
 	}
 
 	// disconnect src inode
