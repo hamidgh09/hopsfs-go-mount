@@ -44,6 +44,7 @@ var FallBackGroup = "root"
 var UserUmask string = ""
 var Umask os.FileMode
 var LocalCacheMaxEntries int = 50
+var LocalCacheMaxFileSize int64 = 10 * 1024 * 1024 // 10 MB default
 
 func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 	flag.BoolVar(&LazyMount, "lazy", false, "Allows to mount HopsFS filesystem before HopsFS is available")
@@ -74,6 +75,7 @@ func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 	flag.StringVar(&FallBackGroup, "fallBackGroup", "root", "Local group name if the DFS group is not found on the local file system.")
 	flag.StringVar(&UserUmask, "umask", "", "Umask for the file system. Must be a 4 digit octal number.")
 	flag.IntVar(&LocalCacheMaxEntries, "localCacheSize", 50, "Max staging files to cache locally (0 to disable)")
+	flag.Int64Var(&LocalCacheMaxFileSize, "localCacheMaxFileSize", 10*1024*1024, "Max file size in bytes to cache locally (default: 10MB)")
 
 	flag.Usage = usage
 	flag.Parse()

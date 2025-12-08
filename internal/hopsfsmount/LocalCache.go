@@ -258,9 +258,16 @@ func (c *LocalCache) Size() int {
 }
 
 // ShouldCache returns true if a file should be downloaded to the local cache.
-// Returns true if caching should proceed, false otherwise.
-// TODO: We need to consider more parameters like file size, etc. here!
+// Checks disk space and file size limits.
 func (c *LocalCache) ShouldCache(file *FileINode) bool {
+	// Check if file exceeds max cacheable size
+	if LocalCacheMaxFileSize > 0 && int64(file.Attrs.Size) > LocalCacheMaxFileSize {
+		logger.Info("File too large for caching", logger.Fields{
+			Path:     file.AbsolutePath(),
+			FileSize: file.Attrs.Size,
+		})
+		return false
+	}
 
 	if err := file.checkDiskSpace(); err != nil {
 		logger.Warn("Not enough disk space for caching", logger.Fields{
