@@ -289,15 +289,15 @@ func (file *FileINode) flushAttempt(operation string) error {
 	file.Attrs.Size = written
 
 	// Stat the file to get the server-assigned mtime after upload
-	// This is needed for cache validation on subsequent reads
-	upstreamInfo, err := hdfsAccessor.Stat(file.AbsolutePath())
-	if err != nil {
-		logger.Warn("Failed to stat file after upload, mtime may be stale", file.logInfo(logger.Fields{Operation: operation, Error: err}))
-		// Truncate to second precision to match HopsFS precision
-		file.Attrs.Mtime = file.Attrs.Mtime.Truncate(time.Second)
-	} else {
-		file.Attrs.Mtime = upstreamInfo.Mtime
-		file.Attrs.Size = upstreamInfo.Size
+	// This is only needed for cache validation on subsequent reads
+	if StagingFileCache != nil {
+		upstreamInfo, err := hdfsAccessor.Stat(file.AbsolutePath())
+		if err != nil {
+			logger.Warn("Failed to stat file after upload, mtime may be stale", file.logInfo(logger.Fields{Operation: operation, Error: err}))
+		} else {
+			file.Attrs.Mtime = upstreamInfo.Mtime
+			file.Attrs.Size = upstreamInfo.Size
+		}
 	}
 
 	return nil
@@ -438,7 +438,6 @@ func (file *FileINode) createStagingFile(operation string, existsInDFS bool) (*o
 		logger.Error("Failed to create staging file", file.logInfo(logger.Fields{Operation: operation, Error: err}))
 		return nil, err
 	}
-	// Only unlink the staging file immediately if caching is disabled.
 	// When caching is enabled, we keep the file on disk for potential reuse.
 	if StagingFileCache == nil {
 		os.Remove(stagingFile.Name())
