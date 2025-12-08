@@ -45,13 +45,13 @@ func NewLocalCache(maxEntries int) *LocalCache {
 	}
 }
 
-// Get retrieves a cached file path for the given HDFS path.
+// Get retrieves a cached file for the given HDFS path.
 // The upstreamSize and upstreamMtime parameters are the current metadata from HopsFS,
 // used to validate that the cached file hasn't been modified by another client.
-// Returns the local file path and true if found and valid, or ("", false) if not cached or stale.
-// If the cache entry is stale (metadata mismatch), it is automatically removed.
+// Returns an open file handle and true if found and valid, or (nil, false) if not cached or stale.
+// If the cache entry is stale (metadata mismatch) or file can't be opened, it is automatically removed.
 // Moves the entry to the front of the LRU list on successful access.
-func (c *LocalCache) Get(hdfsPath string, upstreamSize int64, upstreamMtime time.Time) (string, bool) {
+func (c *LocalCache) Get(hdfsPath string, upstreamSize int64, upstreamMtime time.Time) (*os.File, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -60,7 +60,7 @@ func (c *LocalCache) Get(hdfsPath string, upstreamSize int64, upstreamMtime time
 		logger.Info("Cache miss for staging file", logger.Fields{
 			Path: hdfsPath,
 		})
-		return "", false
+		return nil, false
 	}
 
 	// Validate cache entry against upstream metadata
@@ -72,7 +72,19 @@ func (c *LocalCache) Get(hdfsPath string, upstreamSize int64, upstreamMtime time
 			TmpFile: entry.localPath,
 		})
 		c.removeEntry(hdfsPath)
-		return "", false
+		return nil, false
+	}
+
+	// Try to open the cached file
+	localFile, err := os.OpenFile(entry.localPath, os.O_RDWR, 0600)
+	if err != nil {
+		logger.Warn("Failed to open cached staging file, removing from cache", logger.Fields{
+			Path:    hdfsPath,
+			TmpFile: entry.localPath,
+			Error:   err,
+		})
+		c.removeEntry(hdfsPath)
+		return nil, false
 	}
 
 	// Move to front of LRU list (most recently used)
@@ -83,7 +95,7 @@ func (c *LocalCache) Get(hdfsPath string, upstreamSize int64, upstreamMtime time
 		TmpFile: entry.localPath,
 	})
 
-	return entry.localPath, true
+	return localFile, true
 }
 
 // Put adds a staging file to the cache. If the cache is full, the least
@@ -243,4 +255,49 @@ func (c *LocalCache) Size() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.entries)
+}
+
+// ShouldCache returns true if a file should be downloaded to the local cache.
+// Returns true if caching should proceed, false otherwise.
+// TODO: We need to consider more parameters like file size, etc. here!
+func (c *LocalCache) ShouldCache(file *FileINode) bool {
+
+	if err := file.checkDiskSpace(); err != nil {
+		logger.Warn("Not enough disk space for caching", logger.Fields{
+			Path:  file.AbsolutePath(),
+			Error: err,
+		})
+		return false
+	}
+	return true
+}
+
+// GetOrLoad tries to get a file from cache, or downloads it to cache if not found.
+// Returns a FileProxy if successful (either from cache or freshly downloaded), or nil if caching is not possible.
+func (c *LocalCache) GetOrLoad(file *FileINode, hdfsAccessor HdfsAccessor) FileProxy {
+	absPath := file.AbsolutePath()
+
+	upstreamInfo, err := hdfsAccessor.Stat(absPath)
+	if err != nil {
+		logger.Warn("Failed to stat file for cache validation, skipping cache", logger.Fields{
+			Path:  absPath,
+			Error: err,
+		})
+		return nil
+	}
+
+	// Update file.Attrs with upstream metadata so closeStaging can use correct mtime for caching
+	file.Attrs.Size = upstreamInfo.Size
+	file.Attrs.Mtime = upstreamInfo.Mtime
+
+	if cachedFile, ok := c.Get(absPath, int64(upstreamInfo.Size), upstreamInfo.Mtime); ok {
+		return &LocalRWFileProxy{localFile: cachedFile, file: file}
+	}
+
+	if !c.ShouldCache(file) {
+		return nil
+	}
+
+	// Download to staging file
+	return file.createStagingFileForRead()
 }
