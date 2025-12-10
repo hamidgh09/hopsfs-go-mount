@@ -155,8 +155,6 @@ func (file *FileINode) closeStaging() {
 			stat, statErr := lrwfp.localFile.Stat()
 			localPath := lrwfp.localFile.Name()
 			if statErr == nil && localPath != "" {
-				// Store with current mtime from Attrs (set after successful flush to DFS)
-				// This allows us to detect if the file was modified by another client
 				StagingFileCache.Put(file.AbsolutePath(), localPath, stat.Size(), file.Attrs.Mtime)
 			}
 		}
@@ -289,7 +287,7 @@ func (file *FileINode) flushAttempt(operation string) error {
 	file.Attrs.Size = written
 
 	// Stat the file to get the server-assigned mtime after upload
-	// This is only needed for cache validation on subsequent reads
+	// This is needed for cache validation on subsequent reads
 	if StagingFileCache != nil {
 		upstreamInfo, err := hdfsAccessor.Stat(file.AbsolutePath())
 		if err != nil {
@@ -544,6 +542,7 @@ func (file *FileINode) NewFileHandle(existsInDFS bool, flags fuse.OpenFlags) (*F
 					return nil, err
 				}
 				fh.File.fileProxy = &RemoteROFileProxy{hdfsReader: reader, file: file}
+				logger.Info("Opened file, RO handle", fh.logInfo(logger.Fields{Operation: operation, Flags: fh.fileFlags}))
 			}
 		}
 	}

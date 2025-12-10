@@ -127,7 +127,6 @@ func (c *LocalCache) Put(hdfsPath string, localPath string, size int64, mtime ti
 		c.evictOldest()
 	}
 
-	// Create new entry
 	entry := &CacheEntry{
 		hdfsPath:  hdfsPath,
 		localPath: localPath,
