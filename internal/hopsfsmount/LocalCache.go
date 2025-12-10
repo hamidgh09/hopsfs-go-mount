@@ -57,7 +57,7 @@ func (c *LocalCache) Get(hdfsPath string, upstreamSize int64, upstreamMtime time
 
 	entry, ok := c.entries[hdfsPath]
 	if !ok {
-		logger.Info("Cache miss for staging file", logger.Fields{
+		logger.Debug("Cache miss for staging file", logger.Fields{
 			Path: hdfsPath,
 		})
 		return nil, false
@@ -66,7 +66,7 @@ func (c *LocalCache) Get(hdfsPath string, upstreamSize int64, upstreamMtime time
 	// Validate cache entry against upstream metadata
 	// If size or mtime differs, the file was modified by another client
 	if entry.size != upstreamSize || !entry.mtime.Equal(upstreamMtime) {
-		logger.Info(fmt.Sprintf("Cached staging file is stale, invalidating. cached[size=%d, mtime=%v] upstream[size=%d, mtime=%v]",
+		logger.Debug(fmt.Sprintf("Cached staging file is stale, invalidating. cached[size=%d, mtime=%v] upstream[size=%d, mtime=%v]",
 			entry.size, entry.mtime, upstreamSize, upstreamMtime), logger.Fields{
 			Path:    hdfsPath,
 			TmpFile: entry.localPath,
@@ -90,7 +90,7 @@ func (c *LocalCache) Get(hdfsPath string, upstreamSize int64, upstreamMtime time
 	// Move to front of LRU list (most recently used)
 	c.lruList.MoveToFront(entry.lruElement)
 
-	logger.Info("Cache hit for staging file", logger.Fields{
+	logger.Debug("Cache hit for staging file", logger.Fields{
 		Path:    hdfsPath,
 		TmpFile: entry.localPath,
 	})
@@ -114,7 +114,7 @@ func (c *LocalCache) Put(hdfsPath string, localPath string, size int64, mtime ti
 		existing.size = size
 		existing.mtime = mtime
 		c.lruList.MoveToFront(existing.lruElement)
-		logger.Info("Updated existing cache entry", logger.Fields{
+		logger.Debug("Updated existing cache entry", logger.Fields{
 			Path:     hdfsPath,
 			TmpFile:  localPath,
 			FileSize: size,
@@ -137,7 +137,7 @@ func (c *LocalCache) Put(hdfsPath string, localPath string, size int64, mtime ti
 	entry.lruElement = c.lruList.PushFront(entry)
 	c.entries[hdfsPath] = entry
 
-	logger.Info("Added staging file to cache", logger.Fields{
+	logger.Debug("Added staging file to cache", logger.Fields{
 		Path:     hdfsPath,
 		TmpFile:  localPath,
 		FileSize: size,
@@ -164,7 +164,7 @@ func (c *LocalCache) Rename(oldPath, newPath string) {
 	entry, ok := c.entries[oldPath]
 	if !ok {
 		// No cache entry for old path, nothing to transfer
-		logger.Info("Cache rename: no entry for old path", logger.Fields{
+		logger.Debug("Cache rename: no entry for old path", logger.Fields{
 			From: oldPath,
 			To:   newPath,
 		})
@@ -184,7 +184,7 @@ func (c *LocalCache) Rename(oldPath, newPath string) {
 	// Move to front of LRU (most recently used)
 	c.lruList.MoveToFront(entry.lruElement)
 
-	logger.Info("Cache entry renamed", logger.Fields{
+	logger.Debug("Cache entry renamed", logger.Fields{
 		From:    oldPath,
 		To:      newPath,
 		TmpFile: entry.localPath,
@@ -213,7 +213,7 @@ func (c *LocalCache) removeEntry(hdfsPath string) {
 	// Remove from map
 	delete(c.entries, hdfsPath)
 
-	logger.Info("Removed staging file from cache", logger.Fields{
+	logger.Debug("Removed staging file from cache", logger.Fields{
 		Path:    hdfsPath,
 		TmpFile: entry.localPath,
 	})
@@ -228,12 +228,6 @@ func (c *LocalCache) evictOldest() {
 	}
 
 	entry := oldest.Value.(*CacheEntry)
-	logger.Info("Evicting oldest cache entry", logger.Fields{
-		Path:     entry.hdfsPath,
-		TmpFile:  entry.localPath,
-		FileSize: entry.size,
-	})
-
 	c.removeEntry(entry.hdfsPath)
 }
 
@@ -247,7 +241,7 @@ func (c *LocalCache) Clear() {
 		c.removeEntry(hdfsPath)
 	}
 
-	logger.Info("Cleared staging file cache", nil)
+	logger.Debug("Cleared staging file cache", nil)
 }
 
 // Size returns the current number of entries in the cache.
@@ -262,7 +256,7 @@ func (c *LocalCache) Size() int {
 func (c *LocalCache) ShouldCache(file *FileINode) bool {
 	// Check if file exceeds max cacheable size
 	if LocalCacheMaxFileSize > 0 && int64(file.Attrs.Size) > LocalCacheMaxFileSize {
-		logger.Info("File too large for caching", logger.Fields{
+		logger.Debug("File too large for caching", logger.Fields{
 			Path:     file.AbsolutePath(),
 			FileSize: file.Attrs.Size,
 		})

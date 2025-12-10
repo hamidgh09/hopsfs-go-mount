@@ -420,7 +420,7 @@ func (file *FileINode) createStagingFile(operation string, existsInDFS bool) (*o
 		// Check if we have a valid cached staging file for this path
 		if StagingFileCache != nil {
 			if localFile, ok := StagingFileCache.Get(absPath, int64(upstreamInfo.Size), upstreamInfo.Mtime); ok {
-				logger.Info("Using cached staging file", file.logInfo(logger.Fields{Operation: operation}))
+				logger.Debug("Using cached staging file", file.logInfo(logger.Fields{Operation: operation}))
 				return localFile, nil
 			}
 		}
@@ -544,10 +544,6 @@ func (file *FileINode) NewFileHandle(existsInDFS bool, flags fuse.OpenFlags) (*F
 					return nil, err
 				}
 				fh.File.fileProxy = &RemoteROFileProxy{hdfsReader: reader, file: file}
-				logger.Info(
-					"Opened file, RO handle",
-					fh.logInfo(logger.Fields{Operation: operation, Flags: fh.fileFlags}),
-				)
 			}
 		}
 	}
