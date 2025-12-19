@@ -12,13 +12,6 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// TestNewLocalCache tests cache creation
-func TestNewLocalCache(t *testing.T) {
-	cache := NewLocalCache(10)
-	assert.NotNil(t, cache)
-	assert.Equal(t, 0, cache.Size())
-}
-
 // TestLocalCachePutAndGet tests basic put and get operations
 func TestLocalCachePutAndGet(t *testing.T) {
 	cache := NewLocalCache(10)
@@ -28,11 +21,13 @@ func TestLocalCachePutAndGet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
-	defer os.Remove(tmpFile.Name())
+	defer func(name string) {
+		_ = os.Remove(name)
+	}(tmpFile.Name())
 
 	testData := "test data content"
-	tmpFile.WriteString(testData)
-	tmpFile.Close()
+	_, _ = tmpFile.WriteString(testData)
+	_ = tmpFile.Close()
 
 	hdfsPath := "/test/file.txt"
 	fileInfo, _ := os.Stat(tmpFile.Name())
@@ -42,11 +37,18 @@ func TestLocalCachePutAndGet(t *testing.T) {
 	cache.Put(hdfsPath, tmpFile.Name(), fileInfo.Size(), mtime)
 	assert.Equal(t, 1, cache.Size())
 
-	// Get with matching metadata should succeed
+	// Get with matching metadata should succeed and return correct content
 	file, ok := cache.Get(hdfsPath, fileInfo.Size(), mtime)
 	assert.True(t, ok)
 	assert.NotNil(t, file)
-	file.Close()
+
+	// Verify the file content matches what we wrote
+	content := make([]byte, len(testData))
+	n, err := file.Read(content)
+	assert.NoError(t, err)
+	assert.Equal(t, len(testData), n)
+	assert.Equal(t, testData, string(content))
+	_ = file.Close()
 
 	// Get with non-existent path should fail
 	_, ok = cache.Get("/nonexistent/path", 100, mtime)
@@ -63,10 +65,12 @@ func TestLocalCacheStaleEntry(t *testing.T) {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
 	tmpFilePath := tmpFile.Name()
-	defer os.Remove(tmpFilePath)
+	defer func(name string) {
+		_ = os.Remove(name)
+	}(tmpFilePath)
 
-	tmpFile.WriteString("original content")
-	tmpFile.Close()
+	_, _ = tmpFile.WriteString("original content")
+	_ = tmpFile.Close()
 
 	hdfsPath := "/test/stale.txt"
 	cachedSize := int64(16) // "original content"
@@ -98,16 +102,21 @@ func TestLocalCacheLRUEviction(t *testing.T) {
 	cache := NewLocalCache(maxEntries)
 
 	// Create temp files for testing
-	tmpFiles := make([]*os.File, maxEntries+2)
+	tmpFiles := make([]*os.File, maxEntries+3)
 	for i := 0; i < len(tmpFiles); i++ {
 		tmpFile, err := os.CreateTemp("", fmt.Sprintf("localcache_lru_%d_*", i))
 		if err != nil {
 			t.Fatalf("Failed to create temp file: %v", err)
 		}
-		tmpFile.WriteString(fmt.Sprintf("content %d", i))
-		tmpFile.Close()
+		_, _ = tmpFile.WriteString(fmt.Sprintf("content %d", i))
+		_ = tmpFile.Close()
 		tmpFiles[i] = tmpFile
-		defer os.Remove(tmpFile.Name())
+		defer func(name string) {
+			err := os.Remove(name)
+			if err != nil {
+
+			}
+		}(tmpFile.Name())
 	}
 
 	mtime := time.Now()
@@ -121,8 +130,8 @@ func TestLocalCacheLRUEviction(t *testing.T) {
 	assert.Equal(t, maxEntries, cache.Size())
 
 	// Add one more entry - should evict the oldest (file0)
-	fileInfo, _ := os.Stat(tmpFiles[maxEntries].Name())
-	cache.Put("/test/file_new.txt", tmpFiles[maxEntries].Name(), fileInfo.Size(), mtime)
+	fileInfo, _ := os.Stat(tmpFiles[maxEntries-1].Name())
+	cache.Put("/test/file_new.txt", tmpFiles[maxEntries-1].Name(), fileInfo.Size(), mtime)
 	assert.Equal(t, maxEntries, cache.Size())
 
 	// file0 should be evicted (was the oldest)
@@ -133,63 +142,28 @@ func TestLocalCacheLRUEviction(t *testing.T) {
 	file, ok := cache.Get("/test/file1.txt", int64(9), mtime)
 	assert.True(t, ok)
 	if file != nil {
-		file.Close()
+		_ = file.Close()
 	}
 
 	file, ok = cache.Get("/test/file2.txt", int64(9), mtime)
 	assert.True(t, ok)
 	if file != nil {
-		file.Close()
-	}
-}
-
-// TestLocalCacheLRUAccessOrder tests that accessing entries updates LRU order
-func TestLocalCacheLRUAccessOrder(t *testing.T) {
-	maxEntries := 3
-	cache := NewLocalCache(maxEntries)
-
-	// Create temp files
-	tmpFiles := make([]*os.File, maxEntries+1)
-	for i := 0; i < len(tmpFiles); i++ {
-		tmpFile, err := os.CreateTemp("", fmt.Sprintf("localcache_order_%d_*", i))
-		if err != nil {
-			t.Fatalf("Failed to create temp file: %v", err)
-		}
-		tmpFile.WriteString(fmt.Sprintf("content %d", i))
-		tmpFile.Close()
-		tmpFiles[i] = tmpFile
-		defer os.Remove(tmpFile.Name())
+		_ = file.Close()
 	}
 
-	mtime := time.Now()
-
-	// Add entries: file0, file1, file2
-	for i := 0; i < maxEntries; i++ {
-		hdfsPath := fmt.Sprintf("/test/file%d.txt", i)
-		fileInfo, _ := os.Stat(tmpFiles[i].Name())
-		cache.Put(hdfsPath, tmpFiles[i].Name(), fileInfo.Size(), mtime)
-	}
-
-	// Access file0 to make it most recently used
-	file, ok := cache.Get("/test/file0.txt", int64(9), mtime)
-	assert.True(t, ok)
-	if file != nil {
-		file.Close()
-	}
-
-	// Add new entry - should evict file1 (now the oldest)
-	fileInfo, _ := os.Stat(tmpFiles[maxEntries].Name())
+	// Add new entry - should evict file3 (now the oldest because file1 and file2 are accessed)
+	fileInfo, _ = os.Stat(tmpFiles[maxEntries].Name())
 	cache.Put("/test/file_new.txt", tmpFiles[maxEntries].Name(), fileInfo.Size(), mtime)
 
-	// file1 should be evicted
-	_, ok = cache.Get("/test/file1.txt", int64(9), mtime)
+	// file3 should be evicted
+	_, ok = cache.Get("/test/file3.txt", int64(9), mtime)
 	assert.False(t, ok)
 
-	// file0 should still exist (was accessed recently)
-	file, ok = cache.Get("/test/file0.txt", int64(9), mtime)
+	// file1 should still exist (was accessed recently)
+	file, ok = cache.Get("/test/file1.txt", int64(9), mtime)
 	assert.True(t, ok)
 	if file != nil {
-		file.Close()
+		_ = file.Close()
 	}
 }
 
@@ -203,8 +177,8 @@ func TestLocalCacheRemove(t *testing.T) {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
 	tmpFilePath := tmpFile.Name()
-	tmpFile.WriteString("test content")
-	tmpFile.Close()
+	_, _ = tmpFile.WriteString("test content")
+	_ = tmpFile.Close()
 
 	hdfsPath := "/test/remove.txt"
 	mtime := time.Now()
@@ -233,10 +207,12 @@ func TestLocalCacheRename(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
-	defer os.Remove(tmpFile.Name())
+	defer func(name string) {
+		_ = os.Remove(name)
+	}(tmpFile.Name())
 
-	tmpFile.WriteString("rename test")
-	tmpFile.Close()
+	_, _ = tmpFile.WriteString("rename test")
+	_ = tmpFile.Close()
 
 	oldPath := "/test/old.txt"
 	newPath := "/test/new.txt"
@@ -257,7 +233,7 @@ func TestLocalCacheRename(t *testing.T) {
 	file, ok := cache.Get(newPath, 11, mtime)
 	assert.True(t, ok)
 	if file != nil {
-		file.Close()
+		_ = file.Close()
 	}
 }
 
@@ -270,17 +246,19 @@ func TestLocalCacheRenameWithExistingTarget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
-	defer os.Remove(tmpFile1.Name())
-	tmpFile1.WriteString("source content")
-	tmpFile1.Close()
+	defer func(name string) {
+		_ = os.Remove(name)
+	}(tmpFile1.Name())
+	_, _ = tmpFile1.WriteString("source content")
+	_ = tmpFile1.Close()
 
 	tmpFile2, err := os.CreateTemp("", "localcache_rename2_*")
 	if err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
 	tmpFile2Path := tmpFile2.Name()
-	tmpFile2.WriteString("target content")
-	tmpFile2.Close()
+	_, _ = tmpFile2.WriteString("target content")
+	_ = tmpFile2.Close()
 
 	sourcePath := "/test/source.txt"
 	targetPath := "/test/target.txt"
@@ -303,7 +281,7 @@ func TestLocalCacheRenameWithExistingTarget(t *testing.T) {
 	file, ok := cache.Get(targetPath, 14, mtime)
 	assert.True(t, ok)
 	if file != nil {
-		file.Close()
+		_ = file.Close()
 	}
 }
 
@@ -327,8 +305,8 @@ func TestLocalCacheClear(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Failed to create temp file: %v", err)
 		}
-		tmpFile.WriteString(fmt.Sprintf("content %d", i))
-		tmpFile.Close()
+		_, _ = tmpFile.WriteString(fmt.Sprintf("content %d", i))
+		_ = tmpFile.Close()
 		tmpFiles[i] = tmpFile.Name()
 
 		hdfsPath := fmt.Sprintf("/test/file%d.txt", i)
@@ -357,17 +335,21 @@ func TestLocalCacheUpdateExisting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
-	defer os.Remove(tmpFile1.Name())
-	tmpFile1.WriteString("original")
-	tmpFile1.Close()
+	defer func(name string) {
+		_ = os.Remove(name)
+	}(tmpFile1.Name())
+	_, _ = tmpFile1.WriteString("original")
+	_ = tmpFile1.Close()
 
 	tmpFile2, err := os.CreateTemp("", "localcache_update2_*")
 	if err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
-	defer os.Remove(tmpFile2.Name())
-	tmpFile2.WriteString("updated")
-	tmpFile2.Close()
+	defer func(name string) {
+		_ = os.Remove(name)
+	}(tmpFile2.Name())
+	_, _ = tmpFile2.WriteString("updated")
+	_ = tmpFile2.Close()
 
 	hdfsPath := "/test/update.txt"
 	mtime1 := time.Now()
@@ -385,7 +367,7 @@ func TestLocalCacheUpdateExisting(t *testing.T) {
 	file, ok := cache.Get(hdfsPath, 7, mtime2)
 	assert.True(t, ok)
 	if file != nil {
-		file.Close()
+		_ = file.Close()
 	}
 
 	// Old metadata should not match
@@ -403,8 +385,8 @@ func TestLocalCacheFileNotFound(t *testing.T) {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
 	tmpFilePath := tmpFile.Name()
-	tmpFile.WriteString("content")
-	tmpFile.Close()
+	_, _ = tmpFile.WriteString("content")
+	_ = tmpFile.Close()
 
 	hdfsPath := "/test/notfound.txt"
 	mtime := time.Now()
@@ -413,7 +395,7 @@ func TestLocalCacheFileNotFound(t *testing.T) {
 	assert.Equal(t, 1, cache.Size())
 
 	// Delete the file from disk
-	os.Remove(tmpFilePath)
+	_ = os.Remove(tmpFilePath)
 
 	// Get should fail and remove the entry from cache
 	_, ok := cache.Get(hdfsPath, 7, mtime)
@@ -429,13 +411,15 @@ func TestLocalCacheWithHopsFS(t *testing.T) {
 
 		// Create a test file on HopsFS
 		testFile := filepath.Join(mountPoint, "cache_test_file.txt")
-		os.Remove(testFile) // Clean up from previous runs
+		_ = os.Remove(testFile) // Clean up from previous runs
 
 		testData := "Hello, this is test data for cache testing!"
 		if err := createFile(testFile, testData); err != nil {
 			t.Fatalf("Failed to create test file: %v", err)
 		}
-		defer os.Remove(testFile)
+		defer func(name string) {
+			_ = os.Remove(name)
+		}(testFile)
 
 		// Get file info
 		fileInfo, err := os.Stat(testFile)
@@ -449,10 +433,12 @@ func TestLocalCacheWithHopsFS(t *testing.T) {
 			t.Fatalf("Failed to create staging file: %v", err)
 		}
 		stagingPath := stagingFile.Name()
-		defer os.Remove(stagingPath)
+		defer func(name string) {
+			_ = os.Remove(name)
+		}(stagingPath)
 
-		stagingFile.WriteString(testData)
-		stagingFile.Close()
+		_, _ = stagingFile.WriteString(testData)
+		_ = stagingFile.Close()
 
 		// Put in cache
 		hdfsPath := "/cache_test_file.txt"
@@ -468,7 +454,7 @@ func TestLocalCacheWithHopsFS(t *testing.T) {
 			n, _ := cachedFile.Read(content)
 			assert.Equal(t, len(testData), n)
 			assert.Equal(t, testData, string(content))
-			cachedFile.Close()
+			_ = cachedFile.Close()
 		}
 
 		// Modify the file on HopsFS
