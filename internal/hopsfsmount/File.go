@@ -155,7 +155,16 @@ func (file *FileINode) closeStaging() {
 			stat, statErr := lrwfp.localFile.Stat()
 			localPath := lrwfp.localFile.Name()
 			if statErr == nil && localPath != "" {
-				StagingFileCache.Put(file.AbsolutePath(), localPath, stat.Size(), file.Attrs.Mtime)
+				if LocalCacheMaxFileSize > 0 && stat.Size() > LocalCacheMaxFileSize {
+					logger.Debug("File too large for caching", file.logInfo(logger.Fields{
+						Operation: Close,
+						FileSize:  stat.Size(),
+					}))
+					StagingFileCache.Remove(file.AbsolutePath())
+					_ = os.Remove(localPath)
+				} else {
+					StagingFileCache.Put(file.AbsolutePath(), localPath, stat.Size(), file.Attrs.Mtime)
+				}
 			}
 		}
 
@@ -474,8 +483,8 @@ func (file *FileINode) createStagingFileForRead() *LocalRWFileProxy {
 	}
 
 	if err := file.downloadToStaging(stagingFile); err != nil {
-		stagingFile.Close()
-		os.Remove(stagingFile.Name())
+		_ = stagingFile.Close()
+		_ = os.Remove(stagingFile.Name())
 		return nil
 	}
 
@@ -487,7 +496,6 @@ func (file *FileINode) createStagingFileForRead() *LocalRWFileProxy {
 	}
 
 	logger.Info("Downloaded file to cache", file.logInfo(logger.Fields{TmpFile: stagingFile.Name()}))
-	//TODO: Should it be in RO mode?
 	return &LocalRWFileProxy{localFile: stagingFile, file: file}
 }
 

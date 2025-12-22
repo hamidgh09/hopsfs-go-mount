@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -478,6 +479,94 @@ func TestLocalCacheWithHopsFS(t *testing.T) {
 
 		// Cache should still have 1 entry (updated with modified content)
 		assert.Equal(t, 1, StagingFileCache.Size(), "Cache should have 1 entry after modification")
+	})
+}
+
+// TestLocalCacheMaxFileSizeLimit ensures oversized files are not cached.
+func TestLocalCacheMaxFileSizeLimit(t *testing.T) {
+	originalCache := StagingFileCache
+	originalMaxFileSize := LocalCacheMaxFileSize
+	defer func() {
+		if StagingFileCache != nil {
+			StagingFileCache.Clear()
+		}
+		StagingFileCache = originalCache
+		LocalCacheMaxFileSize = originalMaxFileSize
+	}()
+
+	LocalCacheMaxFileSize = 10
+	StagingFileCache = NewLocalCache(10)
+
+	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
+		small1 := filepath.Join(mountPoint, "small_cache_1.txt")
+		small2 := filepath.Join(mountPoint, "small_cache_2.txt")
+		big1 := filepath.Join(mountPoint, "big_cache_1.txt")
+		big2 := filepath.Join(mountPoint, "big_cache_2.txt")
+		_ = os.Remove(small1)
+		_ = os.Remove(small2)
+		_ = os.Remove(big1)
+		_ = os.Remove(big2)
+
+		defer func() {
+			_ = os.Remove(small1)
+			_ = os.Remove(small2)
+			_ = os.Remove(big1)
+			_ = os.Remove(big2)
+		}()
+
+		smallData := "12345"
+		bigData := strings.Repeat("a", int(LocalCacheMaxFileSize)+5)
+
+		if err := createFile(small1, smallData); err != nil {
+			t.Fatalf("Failed to create small1: %v", err)
+		}
+		if err := createFile(big1, bigData); err != nil {
+			t.Fatalf("Failed to create big1: %v", err)
+		}
+		if err := createFile(small2, smallData); err != nil {
+			t.Fatalf("Failed to create small2: %v", err)
+		}
+		if err := createFile(big2, bigData); err != nil {
+			t.Fatalf("Failed to create big2: %v", err)
+		}
+
+		waitForCacheSize := func(expected int) {
+			deadline := time.Now().Add(1 * time.Second)
+			for time.Now().Before(deadline) && StagingFileCache.Size() != expected {
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+
+		waitForCacheSize(2)
+		assert.Equal(t, 2, StagingFileCache.Size(), "Only small files should be cached")
+
+		// Grow a cached file beyond the limit and ensure it is removed from cache.
+		if err := createFile(small1, bigData); err != nil {
+			t.Fatalf("Failed to grow small1: %v", err)
+		}
+		if err := createFile(big1, bigData+"more"); err != nil {
+			t.Fatalf("Failed to modify big1: %v", err)
+		}
+
+		waitForCacheSize(1)
+		assert.Equal(t, 1, StagingFileCache.Size(), "Only one small file should remain cached")
+
+		checkCached := func(localPath, hdfsPath string, expect bool) {
+			info, err := os.Stat(localPath)
+			if err != nil {
+				t.Fatalf("Failed to stat %s: %v", localPath, err)
+			}
+			cachedFile, cacheHit := StagingFileCache.Get(hdfsPath, info.Size(), info.ModTime())
+			if cachedFile != nil {
+				_ = cachedFile.Close()
+			}
+			assert.Equal(t, expect, cacheHit, "Unexpected cache state for %s", hdfsPath)
+		}
+
+		checkCached(small1, "/small_cache_1.txt", false)
+		checkCached(small2, "/small_cache_2.txt", true)
+		checkCached(big1, "/big_cache_1.txt", false)
+		checkCached(big2, "/big_cache_2.txt", false)
 	})
 }
 
