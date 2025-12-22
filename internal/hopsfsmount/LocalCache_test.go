@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -403,70 +404,250 @@ func TestLocalCacheFileNotFound(t *testing.T) {
 	assert.Equal(t, 0, cache.Size())
 }
 
-// TestLocalCacheWithHopsFS tests the cache with actual HopsFS operations
+// TestLocalCacheWithHopsFS tests the cache integration with actual HopsFS operations
 func TestLocalCacheWithHopsFS(t *testing.T) {
-	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
-		// Create a local cache for testing
-		cache := NewLocalCache(5)
+	// Save original cache and restore after test
+	originalCache := StagingFileCache
+	defer func() {
+		if StagingFileCache != nil {
+			StagingFileCache.Clear()
+		}
+		StagingFileCache = originalCache
+	}()
 
-		// Create a test file on HopsFS
+	// Enable local cache for this test
+	StagingFileCache = NewLocalCache(5)
+
+	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
 		testFile := filepath.Join(mountPoint, "cache_test_file.txt")
 		_ = os.Remove(testFile) // Clean up from previous runs
 
 		testData := "Hello, this is test data for cache testing!"
+
+		// Create a file - it should be cached when closed
 		if err := createFile(testFile, testData); err != nil {
 			t.Fatalf("Failed to create test file: %v", err)
 		}
-		defer func(name string) {
-			_ = os.Remove(name)
-		}(testFile)
+		defer func() {
+			_ = os.Remove(testFile)
+		}()
 
-		// Get file info
-		fileInfo, err := os.Stat(testFile)
+		// File should be in cache after creation and close
+		assert.Equal(t, 1, StagingFileCache.Size(), "File should be cached after creation")
+
+		// Read the file
+		content, err := os.ReadFile(testFile)
 		if err != nil {
-			t.Fatalf("Failed to stat test file: %v", err)
+			t.Fatalf("Failed to read test file: %v", err)
 		}
+		assert.Equal(t, testData, string(content))
 
-		// Create a staging file to simulate cached content
-		stagingFile, err := os.CreateTemp("", "staging_*")
-		if err != nil {
-			t.Fatalf("Failed to create staging file: %v", err)
-		}
-		stagingPath := stagingFile.Name()
-		defer func(name string) {
-			_ = os.Remove(name)
-		}(stagingPath)
-
-		_, _ = stagingFile.WriteString(testData)
-		_ = stagingFile.Close()
-
-		// Put in cache
-		hdfsPath := "/cache_test_file.txt"
-		cache.Put(hdfsPath, stagingPath, fileInfo.Size(), fileInfo.ModTime())
-		assert.Equal(t, 1, cache.Size())
-
-		// Get from cache with matching metadata
-		cachedFile, ok := cache.Get(hdfsPath, fileInfo.Size(), fileInfo.ModTime())
-		assert.True(t, ok)
-		if cachedFile != nil {
-			// Read and verify content
-			content := make([]byte, len(testData))
-			n, _ := cachedFile.Read(content)
-			assert.Equal(t, len(testData), n)
-			assert.Equal(t, testData, string(content))
-			_ = cachedFile.Close()
-		}
-
-		// Modify the file on HopsFS
-		if err := createFile(testFile, "Modified content!"); err != nil {
+		// Modify the file with new content
+		modifiedData := "Modified content!"
+		if err := createFile(testFile, modifiedData); err != nil {
 			t.Fatalf("Failed to modify test file: %v", err)
 		}
 
-		newFileInfo, _ := os.Stat(testFile)
+		// Verify cache has the modified file
+		hdfsPath := "/cache_test_file.txt"
+		modifiedFileInfo, err := os.Stat(testFile)
+		if err != nil {
+			t.Fatalf("Failed to stat modified file: %v", err)
+		}
+		cachedFile, cacheHit := StagingFileCache.Get(hdfsPath, modifiedFileInfo.Size(), modifiedFileInfo.ModTime())
+		assert.True(t, cacheHit, "Modified file should be in cache")
+		if cachedFile != nil {
+			_ = cachedFile.Close()
+		}
 
-		// Get with new metadata should fail (stale)
-		_, ok = cache.Get(hdfsPath, newFileInfo.Size(), newFileInfo.ModTime())
-		assert.False(t, ok)
-		assert.Equal(t, 0, cache.Size())
+		// Read again - should get the new content
+		content, err = os.ReadFile(testFile)
+		if err != nil {
+			t.Fatalf("Failed to read modified file: %v", err)
+		}
+		assert.Equal(t, modifiedData, string(content))
+
+		// Cache should still have 1 entry (updated with modified content)
+		assert.Equal(t, 1, StagingFileCache.Size(), "Cache should have 1 entry after modification")
+	})
+}
+
+// TestLocalCacheReadWriteAfterChown tests that reading and writing work correctly
+// after chown operations when the cache is enabled, and verifies cache staleness behavior
+func TestLocalCacheReadWriteAfterChown(t *testing.T) {
+	// Save original cache and restore after test
+	originalCache := StagingFileCache
+	defer func() {
+		if StagingFileCache != nil {
+			StagingFileCache.Clear()
+		}
+		StagingFileCache = originalCache
+	}()
+
+	// Enable local cache for this test
+	StagingFileCache = NewLocalCache(10)
+
+	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
+		testFile := filepath.Join(mountPoint, "chown_cache_test.txt")
+		hdfsPath := "/chown_cache_test.txt"
+		_ = os.Remove(testFile) // Clean up from previous runs
+
+		testData := "Test data for chown cache test"
+
+		// Create and write initial content
+		if err := createFile(testFile, testData); err != nil {
+			t.Fatalf("Failed to create test file: %v", err)
+		}
+		defer func() {
+			_ = os.Remove(testFile)
+		}()
+
+		// File is already cached after createFile() closes it
+		// Record cache size and file metadata before chown
+		cacheSizeBeforeChown := StagingFileCache.Size()
+		t.Logf("Cache size after file creation: %d", cacheSizeBeforeChown)
+
+		fileInfoBeforeChown, err := os.Stat(testFile)
+		if err != nil {
+			t.Fatalf("Failed to stat file before chown: %v", err)
+		}
+		mtimeBeforeChown := fileInfoBeforeChown.ModTime()
+
+		// Get current uid/gid using syscall
+		stat, ok := fileInfoBeforeChown.Sys().(*syscall.Stat_t)
+		if !ok {
+			t.Skip("Skipping chown test: cannot get file ownership info on this platform")
+		}
+		currentUID := int(stat.Uid)
+		currentGID := int(stat.Gid)
+
+		// Perform chown - set to same owner (this should work without root)
+		// Note: Changing to a different user typically requires root privileges
+		err = os.Chown(testFile, currentUID, currentGID)
+		if err != nil {
+			// Chown might fail due to permission restrictions, which is fine for this test
+			t.Logf("Chown failed (may require elevated privileges): %v", err)
+		}
+
+		// Check if mtime changed after chown (some filesystems update mtime on metadata changes)
+		fileInfoAfterChown, err := os.Stat(testFile)
+		if err != nil {
+			t.Fatalf("Failed to stat file after chown: %v", err)
+		}
+		mtimeAfterChown := fileInfoAfterChown.ModTime()
+
+		if !mtimeBeforeChown.Equal(mtimeAfterChown) {
+			// If mtime changed, the cache entry should become stale
+			// Verify cache handles this correctly by checking if Get would fail with old mtime
+			_, cacheHit := StagingFileCache.Get(hdfsPath, fileInfoBeforeChown.Size(), mtimeBeforeChown)
+			assert.False(t, cacheHit, "Cache should not return entry with old mtime after chown changed mtime")
+		} else {
+			t.Logf("Mtime unchanged after chown (chown to same owner typically doesn't change mtime)")
+		}
+
+		// Read the file - should work regardless of cache state
+		// If cache is stale, it will re-download from HopsFS
+		content, err := os.ReadFile(testFile)
+		if err != nil {
+			t.Fatalf("Failed to read file after chown: %v", err)
+		}
+		assert.Equal(t, testData, string(content))
+
+		// Write new content after chown
+		newData := "Modified content after chown"
+		file, err := os.OpenFile(testFile, os.O_WRONLY|os.O_TRUNC, 0644)
+		if err != nil {
+			t.Fatalf("Failed to open file for writing after chown: %v", err)
+		}
+		_, err = file.WriteString(newData)
+		if err != nil {
+			_ = file.Close()
+			t.Fatalf("Failed to write to file after chown: %v", err)
+		}
+		err = file.Close()
+		if err != nil {
+			t.Fatalf("Failed to close file after write: %v", err)
+		}
+
+		// Read and verify the new content
+		content, err = os.ReadFile(testFile)
+		if err != nil {
+			t.Fatalf("Failed to read file after write: %v", err)
+		}
+		assert.Equal(t, newData, string(content))
+	})
+}
+
+// TestLocalCacheMultipleChmodOperations tests multiple chmod operations
+// with cached file reads/writes interleaved
+func TestLocalCacheMultipleChmodOperations(t *testing.T) {
+	// Save original cache and restore after test
+	originalCache := StagingFileCache
+	defer func() {
+		if StagingFileCache != nil {
+			StagingFileCache.Clear()
+		}
+		StagingFileCache = originalCache
+	}()
+
+	// Enable local cache for this test
+	StagingFileCache = NewLocalCache(10)
+
+	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
+		testFile := filepath.Join(mountPoint, "multi_chmod_cache_test.txt")
+		_ = os.Remove(testFile) // Clean up from previous runs
+
+		testData := "Initial content"
+
+		// Create file
+		if err := createFile(testFile, testData); err != nil {
+			t.Fatalf("Failed to create test file: %v", err)
+		}
+		defer func() {
+			_ = os.Remove(testFile)
+		}()
+
+		permissions := []os.FileMode{0644, 0755, 0600, 0444, 0644}
+
+		for i, perm := range permissions {
+			// Change permissions
+			err := os.Chmod(testFile, perm)
+			if err != nil {
+				t.Fatalf("Failed to chmod file to %o: %v", perm, err)
+			}
+
+			// Verify permissions
+			fileInfo, err := os.Stat(testFile)
+			if err != nil {
+				t.Fatalf("Failed to stat file after chmod to %o: %v", perm, err)
+			}
+			assert.Equal(t, perm, fileInfo.Mode().Perm(), "Permission mismatch at iteration %d", i)
+
+			// Read the file
+			content, err := os.ReadFile(testFile)
+			if err != nil {
+				t.Fatalf("Failed to read file with permission %o: %v", perm, err)
+			}
+			assert.Equal(t, testData, string(content), "Content mismatch at iteration %d", i)
+
+			// Write if we have write permission (not 0444)
+			if perm != 0444 {
+				newData := fmt.Sprintf("Content after chmod %o", perm)
+				file, err := os.OpenFile(testFile, os.O_WRONLY|os.O_TRUNC, perm)
+				if err != nil {
+					t.Fatalf("Failed to open file for writing with permission %o: %v", perm, err)
+				}
+				_, err = file.WriteString(newData)
+				if err != nil {
+					file.Close()
+					t.Fatalf("Failed to write to file with permission %o: %v", perm, err)
+				}
+				err = file.Close()
+				if err != nil {
+					t.Fatalf("Failed to close file: %v", err)
+				}
+				testData = newData // Update expected content for next iteration
+			}
+		}
 	})
 }
